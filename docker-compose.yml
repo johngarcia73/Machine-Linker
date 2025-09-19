@@ -1,0 +1,27 @@
+services:
+  pc1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    tty: true
+    stdin_open: true
+    networks:
+      redlocal:
+        ipv4_address: 172.28.0.2
+
+  pc2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    tty: true
+    stdin_open: true
+    networks:
+      redlocal:
+        ipv4_address: 172.28.0.3
+
+networks:
+  redlocal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
