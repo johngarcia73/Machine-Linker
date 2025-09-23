@@ -10,8 +10,8 @@ RUN apt-get update && \
         iproute2 \
         iputils-ping \
         python3 \
+        python3-tk \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 CMD ["tail", "-f", "/dev/null"]
-#CMD ["python3", "tester.py"]
