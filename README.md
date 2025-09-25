@@ -6,7 +6,9 @@ sudo docker compose build --- Build images.
 
 sudo docker compose up -d    --- Raise containers.
 
-sudo docker exec -it <image-name> /bin/bash     --- Enter to container: Images are networks-project-1-pc1-1 and networks-project-1-pc2-1
+sudo docker exec -it <image-name> /bin/bash     --- Enters to container: Images are pc1, pc2 and pc3.
 
-Example:
-            sudo docker exec -it networks-project-1-pc1-1 /bin/bash  
+                                                    Example:
+                                                                sudo docker exec -it pc1 /bin/bash  
+
+                                                            Then you will be coding at the container`s linux terminal.
