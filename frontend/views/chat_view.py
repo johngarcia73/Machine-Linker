@@ -2,9 +2,10 @@ import tkinter as tk
 from tkinter import ttk
 
 class ChatView(ttk.Frame):
-    def __init__(self, parent, send_callback, back_callback):
+    def __init__(self, parent, send_callback, back_callback,attach_callback):
         super().__init__(parent, padding=10)
         self.send_callback = send_callback
+        self.attach_callback = attach_callback
         
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -15,6 +16,8 @@ class ChatView(ttk.Frame):
         
         back_btn = ttk.Button(header_frame, text="< Back", command=back_callback)
         back_btn.pack(side="left")
+
+        
         
         self.chat_title_var = tk.StringVar()
         ttk.Label(header_frame, textvariable=self.chat_title_var, font=("Helvetica", 14, "bold")).pack(side="left", padx=20)
@@ -43,7 +46,17 @@ class ChatView(ttk.Frame):
         self.msg_entry.bind("<Return>", self._on_send)
 
         self.send_btn = ttk.Button(input_frame, text="Send", command=self._on_send)
-        self.send_btn.grid(row=0, column=1)
+        self.send_btn.grid(row=0, column=1, padx=(0, 5))
+
+        self.attach_btn = ttk.Button(input_frame, text="📎", command=self.attach_callback, width=3)
+        self.attach_btn.grid(row=0, column=2)
+
+
+        self.send_btn = ttk.Button(input_frame, text="Send", command=self._on_send)
+        self.send_btn.grid(row=0, column=1, padx=(0, 5))
+
+        self.attach_btn = ttk.Button(input_frame, text="📎", command=self.attach_callback, width=3)
+        self.attach_btn.grid(row=0, column=2)
 
     def set_chat_target(self, name, mac):
         self.chat_title_var.set(f"{name} ({mac})")
@@ -52,15 +65,19 @@ class ChatView(ttk.Frame):
     def add_message(self, sender_display, text, is_self):
         self.chat_history.config(state="normal")
         
-        # Create a tag for right-aligning self-messages
         self.chat_history.tag_configure("self", justify='right', foreground='#004D40', background='#E0F2F1')
         self.chat_history.tag_configure("other", justify='left', foreground='#000000', background='#FFFFFF')
+        self.chat_history.tag_configure("system", justify='center', foreground='grey', font=("Helvetica", 9, "italic"))
 
         tag = "self" if is_self else "other"
+        
+        # Use system tag for file notifications
+        if "File sent:" in text or "File received:" in text:
+            tag = "system"
+
         self.chat_history.insert(tk.END, f"{sender_display}: {text}\n", tag)
         
         self.chat_history.config(state="disabled")
-        self.chat_history.see(tk.END)
 
     def load_history(self, messages):
         self.chat_history.config(state="normal")

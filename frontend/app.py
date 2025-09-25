@@ -1,6 +1,7 @@
 import tkinter as tk
-from tkinter import ttk, simpledialog, messagebox
+from tkinter import ttk, simpledialog, messagebox,filedialog
 import queue
+import os
 from connections import Machine
 from .views.contact_view import ContactView
 from .views.chat_view import ChatView
@@ -12,7 +13,6 @@ class App(tk.Tk):
         self.geometry("850x600")
         self.minsize(700, 500)
 
-        # --- State ---
         self.machine: Machine | None = None
         self.message_queue = queue.Queue()
         self.contacts = {}  # {mac: name}
@@ -20,7 +20,6 @@ class App(tk.Tk):
         self.current_chat_mac = None
         self.current_view = None
 
-        # --- Main Layout ---
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -29,7 +28,7 @@ class App(tk.Tk):
 
         # --- Views ---
         self.contact_view = ContactView(self, self._rename_contact, self.switch_to_chat_view)
-        self.chat_view = ChatView(self, self._send_message, self.switch_to_contact_view)
+        self.chat_view = ChatView(self, self._send_message, self._send_file, self.switch_to_contact_view)
 
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.after(100, self._process_queue)
@@ -82,6 +81,7 @@ class App(tk.Tk):
         
         self.chat_view.set_chat_target(self.contacts.get(mac, mac), mac)
         self.chat_view.load_history(self.chat_histories.get(mac, []))
+        self.chat_view.attach_btn.config(state="normal")
 
     # --- Backend Logic ---
     def start_machine(self):
@@ -122,6 +122,8 @@ class App(tk.Tk):
         self.chat_histories = {}
         self.contact_view.update_list(self.contacts, "")
         self.switch_to_contact_view()
+        self.chat_view.attach_btn.config(state="disabled")
+
 
     def on_frame_received(self, dest_mac, src_mac, payload):
         self.message_queue.put(("message", {"src": src_mac, "payload": payload}))
@@ -134,7 +136,7 @@ class App(tk.Tk):
             while True:
                 msg_type, data = self.message_queue.get_nowait()
                 if msg_type == "message":
-                    self._handle_incoming_message(data["src"], data["payload"].decode(errors="ignore"))
+                    self._handle_incoming_message(data["src"], data["payload"])
                 elif msg_type == "discovery":
                     mac = data["mac"]
                     if mac not in self.contacts:
@@ -160,27 +162,76 @@ class App(tk.Tk):
     def _send_message(self, msg_text):
         if not self.current_chat_mac or not self.machine: return
         
-        self.machine.send_data(self.current_chat_mac, msg_text.encode())
+        payload = b"TXT:" + msg_text.encode()
+        self.machine.send_data(self.current_chat_mac, payload)
         
         # Add to history and update view
-        message = {"sender_display": "You", "text": msg_text, "is_self": True}
-        if self.current_chat_mac not in self.chat_histories:
-            self.chat_histories[self.current_chat_mac] = []
-        self.chat_histories[self.current_chat_mac].append(message)
-        self.chat_view.add_message(message["sender_display"], message["text"], message["is_self"])
+        self._add_to_history(self.current_chat_mac, "You", msg_text, True)
 
-    def _handle_incoming_message(self, src_mac, text):
-        sender_name = self.contacts.get(src_mac, src_mac)
-        message = {"sender_display": sender_name, "text": text, "is_self": False}
+    def _send_file(self):
+        if not self.current_chat_mac or not self.machine: return
 
-        if src_mac not in self.chat_histories:
-            self.chat_histories[src_mac] = []
-        self.chat_histories[src_mac].append(message)
+        filepath = filedialog.askopenfilename(title="Select a file to send")
+        if not filepath:
+            return
 
-        if src_mac == self.current_chat_mac:
+        filename = os.path.basename(filepath)
+        try:
+            with open(filepath, "rb") as f:
+                file_content = f.read()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read file: {e}")
+            return
+
+        payload = b"FILE:" + filename.encode() + b"::" + file_content
+        
+        self.status_var.set(f"Sending {filename} ({len(payload)} bytes)...")
+        self.update_idletasks() # Force UI update
+
+        self.machine.send_data(self.current_chat_mac, payload)
+        
+        self.status_var.set(f"File {filename} sent successfully.")
+        self._add_to_history(self.current_chat_mac, "System", f"File sent: {filename}", True)
+
+    def _handle_incoming_message(self, src_mac, payload: bytes):
+        if payload.startswith(b"TXT:"):
+            text = payload[4:].decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self._add_to_history(src_mac, sender_name, text, False)
+            if src_mac != self.current_chat_mac:
+                self.status_var.set(f"New message from {sender_name}")
+
+        elif payload.startswith(b"FILE:"):
+            header, file_content = payload[5:].split(b"::", 1)
+            filename = header.decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            
+            self.status_var.set(f"Incoming file '{filename}' from {sender_name}.")
+            self._add_to_history(src_mac, "System", f"File received: '{filename}'.", False)
+            
+            self.after(100, lambda: self._prompt_save_file(filename, file_content))
+
+    def _prompt_save_file(self, filename, content):
+        if messagebox.askyesno("Incoming File", f"You have received a file: '{filename}'.\nDo you want to save it?"):
+            save_path = filedialog.asksaveasfilename(initialfile=filename, title="Save file as...")
+            if save_path:
+                try:
+                    with open(save_path, "wb") as f:
+                        f.write(content)
+                    messagebox.showinfo("Success", f"File saved successfully to:\n{save_path}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Could not save file: {e}")
+
+    def _add_to_history(self, mac_key, sender_display, text, is_self):
+        """Helper function to manage chat history and update the view."""
+        message = {"sender_display": sender_display, "text": text, "is_self": is_self}
+        if mac_key not in self.chat_histories:
+            self.chat_histories[mac_key] = []
+        self.chat_histories[mac_key].append(message)
+
+        if mac_key == self.current_chat_mac:
             self.chat_view.add_message(message["sender_display"], message["text"], message["is_self"])
-        else:
-            self.status_var.set(f"New message from {sender_name}")
+
 
     def _on_closing(self):
         if self.machine and self.machine._running:

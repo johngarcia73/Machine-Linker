@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: pc1
     tty: true
     stdin_open: true
     environment:
@@ -10,13 +11,13 @@ services:
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
     networks:
-      redlocal:
-        ipv4_address: 172.28.0.2
+      - redlocal
 
   pc2:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: pc2
     tty: true
     stdin_open: true
     environment:
@@ -24,9 +25,21 @@ services:
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
     networks:
-      redlocal:
-        ipv4_address: 172.28.0.3
+      - redlocal
 
+  pc3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pc3
+    tty: true
+    stdin_open: true
+    environment:
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    networks:
+      - redlocal
 networks:
   redlocal:
     driver: bridge
