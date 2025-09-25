@@ -10,7 +10,7 @@ class Machine:
     DEFAULT_ETHERTYPE = 0x1234
 
     def __init__(self, interface=None, ethertype=DEFAULT_ETHERTYPE,
-                 frame_handler=None, buffer_size=2048):
+                 frame_handler=None, discovery_handler=None, buffer_size=2048):
         """
         interface     : Interface name,if None picks the first one different from'lo'.
         ethertype     : Ethertype (p.e. 0x1234).
@@ -25,6 +25,7 @@ class Machine:
         self._discovered_machines[self._MAC] = 'ME'
         self._socket = self._open_socket()
         self._handler = frame_handler
+        self._discovery_handler = discovery_handler
         self._running = False
         self._thread = threading.Thread(target=self._capture_loop, daemon=False)
         self.send_greeting()
@@ -76,40 +77,52 @@ class Machine:
 
     def stop(self):
         """Stops the thread and closes the socket."""
-        self._running = False
-        self._thread.join(timeout=1)
-        self._socket.close()
+        if self._running:
+            self._running = False
+            self._socket.shutdown(socket.SHUT_RDWR)
+            self._thread.join(timeout=1)
 
     def _capture_loop(self):
         while self._running:
-            raw_frame, _ = self._socket.recvfrom(self.buffer_size)
-            dest_mac = self.bytes_to_mac(raw_frame[0:6])
-            src_mac = self.bytes_to_mac(raw_frame[6:12])
-            eth_type = struct.unpack("!H", raw_frame[12:14])[0]
-            flag = raw_frame[14]
-            payload = raw_frame[15:]
-            if eth_type == self.ethertype :
+            try:
+                raw_frame, _ = self._socket.recvfrom(self.buffer_size)
+                dest_mac = self.bytes_to_mac(raw_frame[0:6])
+                src_mac = self.bytes_to_mac(raw_frame[6:12])
+                eth_type = struct.unpack("!H", raw_frame[12:14])[0]
+                flag = raw_frame[14]
+                payload = raw_frame[15:]
+                if eth_type == self.ethertype :
 
-                if self.is_introducing(flag):                # If is greeting, I acknowledge and store               
-                    self.add_machine(src_mac)
-                    self.send_frame(src_mac, b'', flag=0b00000010)  # ACK
+                    if self.is_introducing(flag):                # If is greeting, I acknowledge and store               
+                        self.add_machine(src_mac)
+                        self.send_frame(src_mac, b'', flag=0b00000010)  # ACK
 
-                elif self.is_acknowledging(flag):           # If is acknowledging, I store
-                    self.add_machine(src_mac)
+                    elif self.is_acknowledging(flag):           # If is acknowledging, I store
+                        self.add_machine(src_mac)
 
-                elif self.is_speaking(flag):                # If is speaking, handle
-                    if self._handler:
-                        self._handler(dest_mac, src_mac, payload)
-                    else:
-                        print("[%s] Frame %s -> %s, len=%d bytes"
-                            % (self.interface, src_mac, dest_mac, len(payload)))
-                        
+                    elif self.is_speaking(flag):                # If is speaking, handle
+                        if self._handler:
+                            self._handler(dest_mac, src_mac, payload)
+                        else:
+                            print("[%s] Frame %s -> %s, len=%d bytes"
+                                % (self.interface, src_mac, dest_mac, len(payload)))
+            except socket.error:
+                # This will happen when the socket is shut down, ending the loop gracefully.
+                print("Socket closed, capture loop terminating.")
+                break
+            except Exception as e:
+                if self._running:
+                    print(f"An error occurred in capture loop: {e}")
+                    break
+                
 
     def add_machine(self, mac, name='NEW_MACHINE'):
         """Adds a machine to the discovered list."""
         if mac not in self._discovered_machines:
             self._discovered_machines[mac] = name
             print("Discovered new machine: %s" % (mac))
+            if self._discovery_handler:
+                self._discovery_handler(mac)
 
                     
     def send_frame(self, dest_mac, payload, flag=0b00000000, src_mac=None):

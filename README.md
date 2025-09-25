@@ -8,3 +8,5 @@ sudo docker compose up -d    --- Raise containers.
 
 sudo docker exec -it <image-name> /bin/bash     --- Enter to container: Images are networks-project-1-pc1-1 and networks-project-1-pc2-1
 
+Example:
+            sudo docker exec -it networks-project-1-pc1-1 /bin/bash  
