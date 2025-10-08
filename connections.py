@@ -11,8 +11,8 @@ class Machine:
 
     ETH_P_ALL = 0x0003
     DEFAULT_ETHERTYPE = 0x1234
-    MAX_PAYLOAD_SIZE = 1480  # Max payload to avoid fragmentation (standard MTU 1500 - headers)
-    TIME_OUT_SECONDS = 60  # Time in seconds to keep incomplete transfers in buffer
+    MAX_PAYLOAD_SIZE = 1480  # Max payload to avoid fragmentation (standard MTU 1500 -headers)
+    TIME_OUT_SECONDS = 60  # Time in seconds to keep incomplete transfers in buffer.
 
     FLAG_SPEAK = 0b00000000      # A single, complete message
     FLAG_GREET = 0b00000001      # Announce presence (broadcast)
@@ -205,15 +205,14 @@ class Machine:
         if len(data) <= self.MAX_PAYLOAD_SIZE:
             self.send_frame(dest_mac, data, self.FLAG_SPEAK)
             return
-
         # If data is too large, divide it.
         print(f"Data is large ({len(data)} bytes). Starting chunked transfer.")
         tid = random.randint(0, 0xFFFFFFFF)
         chunks = [data[i:i + self.CHUNK_DATA_SIZE] for i in range(0, len(data), self.CHUNK_DATA_SIZE)]
         total_chunks = len(chunks)
-
+        
         for i, chunk_data in enumerate(chunks):
-            # Calculate CRC32 checksum for the data part of the chunk
+            # Calculate CRC32 checksum for the data part of the chunk 
             crc = zlib.crc32(chunk_data)
             
             header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, i, total_chunks, crc)
@@ -226,6 +225,7 @@ class Machine:
     def get_interface_mac(self) -> str:
         with open(f"/sys/class/net/{self._interface}/address") as f:
             return f.read().strip()
+
 
     @classmethod
     def _first_non_lo(cls) -> str:
