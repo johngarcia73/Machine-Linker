@@ -140,8 +140,6 @@ class Machine:
 
     def _process_chunk(self, dest_mac, src_mac, payload):
         """Validates and stores a chunk, reassembling the message if complete.
-        FIX: update the reassembly 'timestamp' on each new chunk arrival so the
-        transfer is not timed out while still active.
         """
         if len(payload) < self.TRANSPORT_HEADER_SIZE:
             return  # Bad chunk
@@ -207,9 +205,6 @@ class Machine:
 
     def _reassemble_chunks(self, tid):
         """Reconstructs the full message from chunks and passes it to the handler.
-
-        FIX: pop the reassembly buffer entry (free memory) and use stored 'src' to
-        call the handler. Preserve the API: handler(dest_mac, src_mac, data).
         """
         # pop to avoid keeping completed transfer in memory
         transfer = self._reassembly_buffer.pop(tid, None)
