@@ -110,8 +110,14 @@ class Machine:
                     self.add_machine(src_mac)
 
                 elif flag == self.FLAG_SPEAK:
-                    if self._handler:
-                        self._handler(dest_mac, src_mac, payload)
+                    if dest_mac == "ff:ff:ff:ff:ff:ff":
+                        # Handle broadcast messages
+                        if self._handler:
+                            self._handler(dest_mac, src_mac, payload)
+                    else:
+                        # Handle direct messages
+                        if self._handler:
+                            self._handler(dest_mac, src_mac, payload)
 
                 elif flag == self.FLAG_CHUNK:
                     self._process_chunk(dest_mac, src_mac, payload)

@@ -47,7 +47,11 @@ class App(tk.Tk):
         self.contact_view.add_broadcast_message("You", msg_text)
 
     def _handle_incoming_message(self, src_mac, payload: bytes):
-        if payload.startswith(b"TXT:"):
+        if payload.startswith(b"BROADCAST:"):
+            text = payload[10:].decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self.contact_view.add_broadcast_message(sender_name, text)
+        elif payload.startswith(b"TXT:"):
             text = payload[4:].decode(errors="ignore")
             sender_name = self.contacts.get(src_mac, src_mac)
             self._add_to_history(src_mac, sender_name, text, False)
@@ -240,7 +244,11 @@ class App(tk.Tk):
         )
 
     def _handle_incoming_message(self, src_mac, payload: bytes):
-        if payload.startswith(b"TXT:"):
+        if payload.startswith(b"BROADCAST:"):
+            text = payload[10:].decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self.contact_view.add_broadcast_message(sender_name, text)
+        elif payload.startswith(b"TXT:"):
             text = payload[4:].decode(errors="ignore")
             sender_name = self.contacts.get(src_mac, src_mac)
             self._add_to_history(src_mac, sender_name, text, False)
