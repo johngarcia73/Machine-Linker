@@ -5,25 +5,27 @@ import threading
 import time
 import random
 import zlib  # For CRC32 checksum
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 
 class Machine:
 
     ETH_P_ALL = 0x0003
     DEFAULT_ETHERTYPE = 0x1234
-    MAX_PAYLOAD_SIZE = 1480  # Max payload to avoid fragmentation (standard MTU 1500 - headers)
-    TIME_OUT_SECONDS = 60  # Time in seconds to keep incomplete transfers in buffer
+    MAX_PAYLOAD_SIZE = 1480
+    TIME_OUT_SECONDS = 60
 
-    FLAG_SPEAK = 0b00000000      # A single, complete message
-    FLAG_GREET = 0b00000001      # Announce presence (broadcast)
-    FLAG_ACK = 0b00000010        # Acknowledge a greeting
-    FLAG_CHUNK = 0b00000100      # A chunk of a larger message/file
+    FLAG_SPEAK = 0b00000000
+    FLAG_GREET = 0b00000001
+    FLAG_ACK = 0b00000010
+    FLAG_CHUNK = 0b00000100
+    FLAG_CHUNK_ACK = 0b00001000
+    FLAG_CHUNK_NACK = 0b00010000
 
-    # ! = network byte order (big-endian)
-    
-    TRANSPORT_HEADER_FORMAT = "!IIII"   # I = unsigned int (4 bytes)
+    TRANSPORT_HEADER_FORMAT = "!IIII"
     TRANSPORT_HEADER_SIZE = struct.calcsize(TRANSPORT_HEADER_FORMAT)
     CHUNK_DATA_SIZE = MAX_PAYLOAD_SIZE - TRANSPORT_HEADER_SIZE
+    CHUNK_RETRANSMIT_TIMEOUT = 0.5
+    SLIDING_WINDOW_SIZE = 16
 
     def __init__(self, interface=None, ethertype=DEFAULT_ETHERTYPE,
                  frame_handler=None, discovery_handler=None, buffer_size=2048):
@@ -45,6 +47,8 @@ class Machine:
         # Stores incoming chunks before they are complete.
         # Format: { transfer_id: { "total": int, "chunks": { index: data }, "timestamp": float } }
         self._reassembly_buffer: Dict[int, Dict[str, Any]] = {}
+        self._outgoing_transfers: Dict[int, Dict[str, Any]] = {}
+        self._transfer_lock = threading.Lock()
         self.send_greeting()
 
     @staticmethod
@@ -112,6 +116,12 @@ class Machine:
                 elif flag == self.FLAG_CHUNK:
                     self._process_chunk(dest_mac, src_mac, payload)
 
+                elif flag == self.FLAG_CHUNK_ACK:
+                    self._process_chunk_ack(src_mac, payload)
+
+                elif flag == self.FLAG_CHUNK_NACK:
+                    self._process_chunk_nack(src_mac, payload)
+
             except socket.error:
                 if self._running: print("Socket error in capture loop.")
                 break
@@ -123,57 +133,125 @@ class Machine:
         print("Capture loop terminated.")
 
     def _process_chunk(self, dest_mac, src_mac, payload):
-        """Validates and stores a chunk, reassembling the message if complete."""
+        """Validates and stores a chunk, reassembling the message if complete.
+        FIX: update the reassembly 'timestamp' on each new chunk arrival so the
+        transfer is not timed out while still active.
+        """
         if len(payload) < self.TRANSPORT_HEADER_SIZE:
-            return # Bad chunk
+            return  # Bad chunk
 
         # Parse the transport header
         header = payload[:self.TRANSPORT_HEADER_SIZE]
         chunk_data = payload[self.TRANSPORT_HEADER_SIZE:]
-        id, index, total, received_crc = struct.unpack(self.TRANSPORT_HEADER_FORMAT, header)
+        tid, index, total, received_crc = struct.unpack(self.TRANSPORT_HEADER_FORMAT, header)
 
         # Validate chunk integrity
         calculated_crc = zlib.crc32(chunk_data)
         if received_crc != calculated_crc:
-            print(f"CRC mismatch for chunk {index}/{total} from {src_mac}. Discarding.")
+            print(f"CRC mismatch for chunk {index}/{total} from {src_mac}. Sending NACK.")
+            self.send_chunk_control_frame(src_mac, tid, index, total, self.FLAG_CHUNK_NACK)
             return
 
-        # Store the chunk
-        if id not in self._reassembly_buffer:
-            self._reassembly_buffer[id] = {"total": total, "chunks": {}, "timestamp": time.time()}
-        
-        self._reassembly_buffer[id]["chunks"][index] = chunk_data
+        # Store the chunk (create reassembly entry if first chunk)
+        now = time.time()
+        if tid not in self._reassembly_buffer:
+            # include src so reassemble can know origin without external parameters
+            self._reassembly_buffer[tid] = {
+                "total": total,
+                "chunks": {},
+                "timestamp": now,
+                "src": src_mac
+            }
 
-        # Check for completion and reassemble
-        if len(self._reassembly_buffer[id]["chunks"]) == self._reassembly_buffer[id]["total"]:
-            self._reassemble_chunks(id, dest_mac, src_mac)
-        
+        # update timestamp on every chunk arrival (prevents premature timeout)
+        self._reassembly_buffer[tid]["timestamp"] = now
+
+        # store chunk if not already present
+        if index not in self._reassembly_buffer[tid]["chunks"]:
+            self._reassembly_buffer[tid]["chunks"][index] = chunk_data
+
+        # acknowledge chunk reception to sender
+        self.send_chunk_control_frame(src_mac, tid, index, total, self.FLAG_CHUNK_ACK)
+
+        # if complete, reassemble and deliver
+        if len(self._reassembly_buffer[tid]["chunks"]) == self._reassembly_buffer[tid]["total"]:
+            self._reassemble_chunks(tid)
+
+        # do housekeeping (removes expired transfers)
         self._cleanup_buffer()
 
-    def _reassemble_chunks(self, id, dest_mac, src_mac):
-        """Reconstructs the full message from chunks and passes it to the handler."""
-        transfer = self._reassembly_buffer.pop(id)
-        total_chunks = transfer["total"]
-        chunks = transfer["chunks"]
 
-        if len(chunks) != total_chunks:
-            print(f"Transfer {id} from {src_mac} is incomplete. Dropping.")
+    def _process_chunk_ack(self, src_mac, payload):
+        if len(payload) < self.TRANSPORT_HEADER_SIZE: return
+        tid, index, _, _ = struct.unpack(self.TRANSPORT_HEADER_FORMAT, payload)
+        with self._transfer_lock:
+            if tid in self._outgoing_transfers:
+                with self._outgoing_transfers[tid]["lock"]:
+                    if index < len(self._outgoing_transfers[tid]["ack_status"]) and not self._outgoing_transfers[tid]["ack_status"][index]:
+                        self._outgoing_transfers[tid]["ack_status"][index] = True
+
+    def _process_chunk_nack(self, src_mac, payload):
+        if len(payload) < self.TRANSPORT_HEADER_SIZE: return
+        tid, index, _, _ = struct.unpack(self.TRANSPORT_HEADER_FORMAT, payload)
+        with self._transfer_lock:
+            if tid in self._outgoing_transfers:
+                print(f"NACK received for chunk {index} of transfer {tid}. Retransmitting.")
+                with self._outgoing_transfers[tid]["lock"]:
+                    self._send_chunk_internal(tid, index)
+
+    def _reassemble_chunks(self, tid):
+        """Reconstructs the full message from chunks and passes it to the handler.
+
+        FIX: pop the reassembly buffer entry (free memory) and use stored 'src' to
+        call the handler. Preserve the API: handler(dest_mac, src_mac, data).
+        """
+        # pop to avoid keeping completed transfer in memory
+        transfer = self._reassembly_buffer.pop(tid, None)
+        if transfer is None:
+            # nothing to do
             return
 
-        # Reconstruct the message
-        full_data = b"".join(chunks[i] for i in range(total_chunks))
-        
-        print(f"Reassembled message of {len(full_data)} bytes from {src_mac}.")
+        total_chunks = transfer["total"]
+        chunks = transfer["chunks"]
+        src_mac = transfer.get("src", None)
+
+        if len(chunks) != total_chunks:
+            print(f"Transfer {tid} from {src_mac} is incomplete. Dropping.")
+            return
+
+        # Reconstruct the message in correct order
+        try:
+            full_data = b"".join(chunks[i] for i in range(total_chunks))
+        except KeyError:
+            # missing piece (shouldn't happen because we checked lengths), but be safe
+            print(f"Transfer {tid} missing chunks on reassembly from {src_mac}.")
+            return
+
+        print(f"Reassembled message of {len(full_data)} bytes from {src_mac} (transfer {tid}).")
         if self._handler:
-            self._handler(dest_mac, src_mac, full_data)
+            # dest_mac is this machine's MAC (frame received was addressed to us)
+            self._handler(self._MAC, src_mac, full_data)
+
 
     def _cleanup_buffer(self):
-        """Removes old, incomplete transfers from the reassembly buffer."""
+        """Removes old, incomplete transfers from the reassembly buffer.
+
+        FIX: simpler, robust expiration logic based on last activity timestamp.
+        """
         current_time = time.time()
-        to_delete = [id for id, data in self._reassembly_buffer.items() if current_time - data["timestamp"] > self.TIME_OUT_SECONDS]
-        for id in to_delete:
-            del self._reassembly_buffer[id]
-            print(f"Timed out and removed incomplete transfer {id}.")
+        to_delete = []
+        for tid, data in list(self._reassembly_buffer.items()):
+            # data must have a 'timestamp'; if missing, be conservative and schedule deletion
+            ts = data.get("timestamp", 0)
+            if current_time - ts > self.TIME_OUT_SECONDS:
+                to_delete.append(tid)
+
+        for tid in to_delete:
+            transfer = self._reassembly_buffer.pop(tid, None)
+            if transfer:
+                src = transfer.get("src", "<unknown>")
+                print(f"Timed out and removed incomplete transfer {tid} from {src}.")
+
 
     def add_machine(self, mac, name='NEW_MACHINE'):
         if mac not in self._discovered_machines:
@@ -197,31 +275,85 @@ class Machine:
     def send_ack(self, dest_mac: str):
         self.send_frame(dest_mac, b'', self.FLAG_ACK)
 
-    def send_data(self, dest_mac: str, data: bytes):
+    def send_chunk_control_frame(self, dest_mac: str, tid: int, index: int, total: int, flag: int):
+        header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, index, total, 0)
+        self.send_frame(dest_mac, header, flag)
+
+    def send_data(self, dest_mac: str, data: bytes, progress_callback: Callable[[int], None] = None, completion_callback: Callable[[], None] = None):
         """
         Sends data to a specific MAC. Automatically handles fragmentation for large data.
         """
         # If data is small enough, send as a single frame.
         if len(data) <= self.MAX_PAYLOAD_SIZE:
             self.send_frame(dest_mac, data, self.FLAG_SPEAK)
+            if completion_callback:
+                completion_callback()
             return
 
         # If data is too large, divide it.
-        print(f"Data is large ({len(data)} bytes). Starting chunked transfer.")
         tid = random.randint(0, 0xFFFFFFFF)
         chunks = [data[i:i + self.CHUNK_DATA_SIZE] for i in range(0, len(data), self.CHUNK_DATA_SIZE)]
         total_chunks = len(chunks)
 
-        for i, chunk_data in enumerate(chunks):
-            # Calculate CRC32 checksum for the data part of the chunk
-            crc = zlib.crc32(chunk_data)
-            
-            header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, i, total_chunks, crc)
-            
-            self.send_frame(dest_mac, header + chunk_data, self.FLAG_CHUNK)
-            time.sleep(0.001) 
-        
-        print(f"Sent {total_chunks} chunks for transfer ID {tid}.")
+        with self._transfer_lock:
+            self._outgoing_transfers[tid] = {
+                "dest_mac": dest_mac,
+                "chunks": chunks,
+                "total_chunks": total_chunks,
+                "ack_status": [False] * total_chunks,
+                "last_sent_time": [0.0] * total_chunks,
+                "lock": threading.Lock(),
+                "progress_callback": progress_callback,
+                "completion_callback": completion_callback
+            }
+        threading.Thread(target=self._manage_transfer, args=(tid,), daemon=True).start()
+        print(f"Data is large ({len(data)} bytes). Starting ARQ transfer {tid} with {total_chunks} chunks.")
+
+    def _manage_transfer(self, tid: int):
+        try:
+            with self._transfer_lock:
+                if tid not in self._outgoing_transfers: return
+                transfer = self._outgoing_transfers[tid]
+            window_start = 0
+            last_progress_pct = -1
+            while window_start < transfer["total_chunks"]:
+                with transfer["lock"]:
+                    window_end = min(window_start + self.SLIDING_WINDOW_SIZE, transfer["total_chunks"])
+                    for i in range(window_start, window_end):
+                        if not transfer["ack_status"][i] and transfer["last_sent_time"][i] == 0.0:
+                            self._send_chunk_internal(tid, i)
+                    current_time = time.time()
+                    for i in range(window_start, window_end):
+                        if not transfer["ack_status"][i] and current_time - transfer["last_sent_time"][i] > self.CHUNK_RETRANSMIT_TIMEOUT:
+                            print(f"Timeout for chunk {i} of transfer {tid}. Retransmitting.")
+                            self._send_chunk_internal(tid, i)
+                    while window_start < transfer["total_chunks"] and transfer["ack_status"][window_start]:
+                        window_start += 1
+                if transfer["progress_callback"]:
+                    acked_count = sum(transfer["ack_status"])
+                    progress_pct = int((acked_count / transfer["total_chunks"]) * 100)
+                    if progress_pct > last_progress_pct:
+                        transfer["progress_callback"](progress_pct)
+                        last_progress_pct = progress_pct
+                time.sleep(0.01)
+            if transfer["progress_callback"] and last_progress_pct < 100:
+                transfer["progress_callback"](100)
+            print(f"Transfer {tid} completed successfully.")
+            if transfer["completion_callback"]:
+                transfer["completion_callback"]()
+        finally:
+            with self._transfer_lock:
+                if tid in self._outgoing_transfers:
+                    del self._outgoing_transfers[tid]
+                    print(f"Cleaned up transfer {tid}.")
+
+    def _send_chunk_internal(self, tid: int, index: int):
+        transfer = self._outgoing_transfers[tid]
+        chunk_data = transfer["chunks"][index]
+        crc = zlib.crc32(chunk_data)
+        header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, index, transfer["total_chunks"], crc)
+        self.send_frame(transfer["dest_mac"], header + chunk_data, self.FLAG_CHUNK)
+        transfer["last_sent_time"][index] = time.time()
 
     def get_interface_mac(self) -> str:
         with open(f"/sys/class/net/{self._interface}/address") as f:

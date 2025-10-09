@@ -27,6 +27,28 @@ class ContactView(ttk.Frame):
         rename_btn = ttk.Button(container, text="Rename Selected", command=self._on_rename)
         rename_btn.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
 
+
+        broadcast_frame = ttk.LabelFrame(self, text="General Chat (Broadcast)")
+        broadcast_frame.grid(sticky="ew", padx=5, pady=(10,0))
+        self.broadcast_history = tk.Text(broadcast_frame, state="disabled", height=8, wrap="word", font=("Helvetica", 11))
+        self.broadcast_history.pack(fill="both", expand=True, padx=5, pady=5)
+        self.broadcast_entry = ttk.Entry(broadcast_frame, font=("Helvetica", 11))
+        self.broadcast_entry.pack(side="left", fill="x", expand=True, padx=(5,0), pady=5)
+        self.broadcast_entry.bind("<Return>", self._on_broadcast_send)
+        self.broadcast_send_btn = ttk.Button(broadcast_frame, text="Send", command=self._on_broadcast_send)
+        self.broadcast_send_btn.pack(side="left", padx=5, pady=5)
+
+    def add_broadcast_message(self, sender, text):
+        self.broadcast_history.config(state="normal")
+        self.broadcast_history.insert(tk.END, f"{sender}: {text}\n")
+        self.broadcast_history.config(state="disabled")
+
+    def _on_broadcast_send(self, event=None):
+        msg = self.broadcast_entry.get()
+        if msg:
+            self.broadcast_entry.delete(0, tk.END)
+            self.master.send_broadcast_message(msg)
+
     def update_list(self, contacts, self_mac):
         """Refreshes the contact listbox."""
         current_selection = self.contact_listbox.curselection()

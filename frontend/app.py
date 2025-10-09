@@ -5,6 +5,11 @@ import os
 from connections import Machine
 from .views.contact_view import ContactView
 from .views.chat_view import ChatView
+import time
+from time import sleep
+import threading
+import struct
+import zlib
 
 class App(tk.Tk):
     def __init__(self):
@@ -34,6 +39,31 @@ class App(tk.Tk):
         self.after(100, self._process_queue)
         
         self.switch_to_contact_view()
+
+    def send_broadcast_message(self, msg_text):
+        if not self.machine: return
+        payload = b"BROADCAST:" + msg_text.encode()
+        self.machine.send_frame("ff:ff:ff:ff:ff:ff", payload, self.machine.FLAG_SPEAK)
+        self.contact_view.add_broadcast_message("You", msg_text)
+
+    def _handle_incoming_message(self, src_mac, payload: bytes):
+        if payload.startswith(b"TXT:"):
+            text = payload[4:].decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self._add_to_history(src_mac, sender_name, text, False)
+            if src_mac != self.current_chat_mac:
+                self.status_var.set(f"New message from {sender_name}")
+
+        elif payload.startswith(b"FILE:"):
+            header, file_content = payload[5:].split(b"::", 1)
+            filename = header.decode(errors="ignore")
+            sender_name = self.contacts.get(src_mac, src_mac)
+            
+            self.status_var.set(f"Incoming file '{filename}' from {sender_name}.")
+            self._add_to_history(src_mac, "System", f"File received: '{filename}'.", False)
+            
+            self.after(100, lambda: self._prompt_save_file(filename, file_content))
+
 
     def _build_config_bar(self):
         frame = ttk.Frame(self, padding="5")
@@ -186,12 +216,28 @@ class App(tk.Tk):
         payload = b"FILE:" + filename.encode() + b"::" + file_content
         
         self.status_var.set(f"Sending {filename} ({len(payload)} bytes)...")
-        self.update_idletasks() # Force UI update
+        self.update_idletasks()
 
-        self.machine.send_data(self.current_chat_mac, payload)
-        
-        self.status_var.set(f"File {filename} sent successfully.")
-        self._add_to_history(self.current_chat_mac, "System", f"File sent: {filename}", True)
+        def progress_update(percentage: int):
+            self.chat_view.update_progress_bar(percentage)
+
+        def on_send_complete():
+            self.chat_view.hide_progress_bar()
+            self.chat_view.send_btn.config(state="normal")
+            self.chat_view.attach_btn.config(state="normal")
+            self.status_var.set(f"File {filename} sent successfully.")
+            self._add_to_history(self.current_chat_mac, "System", f"File sent: {filename}", True)
+
+        self.chat_view.show_progress_bar(f"Sending {filename}...")
+        self.chat_view.send_btn.config(state="disabled")
+        self.chat_view.attach_btn.config(state="disabled")
+
+        self.machine.send_data(
+            self.current_chat_mac, 
+            payload,
+            progress_callback=lambda pct: self.after(0, progress_update, pct),
+            completion_callback=lambda: self.after(0, on_send_complete)
+        )
 
     def _handle_incoming_message(self, src_mac, payload: bytes):
         if payload.startswith(b"TXT:"):

@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 
 class ChatView(ttk.Frame):
-    def __init__(self, parent, send_callback, back_callback,attach_callback):
+    def __init__(self, parent, send_callback, back_callback, attach_callback):
         super().__init__(parent, padding=10)
         self.send_callback = send_callback
         self.attach_callback = attach_callback
@@ -51,12 +51,16 @@ class ChatView(ttk.Frame):
         self.attach_btn = ttk.Button(input_frame, text="📎", command=self.attach_callback, width=3)
         self.attach_btn.grid(row=0, column=2)
 
-
-        self.send_btn = ttk.Button(input_frame, text="Send", command=self._on_send)
-        self.send_btn.grid(row=0, column=1, padx=(0, 5))
-
-        self.attach_btn = ttk.Button(input_frame, text="📎", command=self.attach_callback, width=3)
-        self.attach_btn.grid(row=0, column=2)
+        # --- Barra de progreso para envío de archivos ---
+        self.progress_frame = ttk.Frame(self)
+        # No se usa grid() aquí, se gestionará con show/hide
+        self.progress_label = ttk.Label(self.progress_frame, text="")
+        self.progress_label.pack(side="left", padx=(0, 5))
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(self.progress_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        self.percent_label = ttk.Label(self.progress_frame, text="0%")
+        self.percent_label.pack(side="left", padx=5)
 
     def set_chat_target(self, name, mac):
         self.chat_title_var.set(f"{name} ({mac})")
@@ -78,6 +82,7 @@ class ChatView(ttk.Frame):
         self.chat_history.insert(tk.END, f"{sender_display}: {text}\n", tag)
         
         self.chat_history.config(state="disabled")
+        self.chat_history.see(tk.END) # Auto-scroll to the bottom
 
     def load_history(self, messages):
         self.chat_history.config(state="normal")
@@ -91,3 +96,19 @@ class ChatView(ttk.Frame):
         if msg:
             self.send_callback(msg)
             self.msg_var.set("")
+
+    def show_progress_bar(self, text=""):
+        """Muestra la barra de progreso."""
+        self.progress_label.config(text=text)
+        self.progress_var.set(0)
+        self.percent_label.config(text="0%")
+        self.progress_frame.grid(row=3, column=0, sticky="ew", pady=(5, 0))
+
+    def update_progress_bar(self, pct):
+        """Actualiza el valor de la barra de progreso."""
+        self.progress_var.set(pct)
+        self.percent_label.config(text=f"{pct}%")
+
+    def hide_progress_bar(self):
+        """Oculta la barra de progreso."""
+        self.progress_frame.grid_remove()
