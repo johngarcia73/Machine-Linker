@@ -33,7 +33,7 @@ class App(tk.Tk):
 
         # --- Views ---
         self.contact_view = ContactView(self, self._rename_contact, self.switch_to_chat_view)
-        self.chat_view = ChatView(self, self._send_message, self._send_file, self.switch_to_contact_view)
+        self.chat_view = ChatView(self, self._send_message, self.switch_to_contact_view, self._send_file)
 
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.after(100, self._process_queue)
@@ -72,7 +72,7 @@ class App(tk.Tk):
     def _build_config_bar(self):
         frame = ttk.Frame(self, padding="5")
         frame.grid(row=0, column=0, sticky="ew")
-        # ... (same as your previous version)
+
         ttk.Label(frame, text="Interface:").pack(side="left", padx=(0, 5))
         interfaces = ["Select..."] + Machine.list_interfaces()
         self.iface_var = tk.StringVar(value=interfaces[1] if len(interfaces) > 1 else interfaces[0])

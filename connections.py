@@ -159,7 +159,7 @@ class Machine:
         # Store the chunk (create reassembly entry if first chunk)
         now = time.time()
         if tid not in self._reassembly_buffer:
-            # include src so reassemble can know origin without external parameters
+            # include src so reassemble can know origin without
             self._reassembly_buffer[tid] = {
                 "total": total,
                 "chunks": {},
@@ -170,18 +170,13 @@ class Machine:
         # update timestamp on every chunk arrival (prevents premature timeout)
         self._reassembly_buffer[tid]["timestamp"] = now
 
-        # store chunk if not already present
         if index not in self._reassembly_buffer[tid]["chunks"]:
             self._reassembly_buffer[tid]["chunks"][index] = chunk_data
-
         # acknowledge chunk reception to sender
         self.send_chunk_control_frame(src_mac, tid, index, total, self.FLAG_CHUNK_ACK)
-
-        # if complete, reassemble and deliver
         if len(self._reassembly_buffer[tid]["chunks"]) == self._reassembly_buffer[tid]["total"]:
             self._reassemble_chunks(tid)
 
-        # do housekeeping (removes expired transfers)
         self._cleanup_buffer()
 
 
@@ -209,7 +204,6 @@ class Machine:
         # pop to avoid keeping completed transfer in memory
         transfer = self._reassembly_buffer.pop(tid, None)
         if transfer is None:
-            # nothing to do
             return
 
         total_chunks = transfer["total"]
@@ -220,11 +214,10 @@ class Machine:
             print(f"Transfer {tid} from {src_mac} is incomplete. Dropping.")
             return
 
-        # Reconstruct the message in correct order
         try:
             full_data = b"".join(chunks[i] for i in range(total_chunks))
         except KeyError:
-            # missing piece (shouldn't happen because we checked lengths), but be safe
+            # missing piece (won't happen now)
             print(f"Transfer {tid} missing chunks on reassembly from {src_mac}.")
             return
 
@@ -236,8 +229,6 @@ class Machine:
 
     def _cleanup_buffer(self):
         """Removes old, incomplete transfers from the reassembly buffer.
-
-        FIX: simpler, robust expiration logic based on last activity timestamp.
         """
         current_time = time.time()
         to_delete = []

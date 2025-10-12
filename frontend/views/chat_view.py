@@ -51,9 +51,7 @@ class ChatView(ttk.Frame):
         self.attach_btn = ttk.Button(input_frame, text="📎", command=self.attach_callback, width=3)
         self.attach_btn.grid(row=0, column=2)
 
-        # --- Barra de progreso para envío de archivos ---
         self.progress_frame = ttk.Frame(self)
-        # No se usa grid() aquí, se gestionará con show/hide
         self.progress_label = ttk.Label(self.progress_frame, text="")
         self.progress_label.pack(side="left", padx=(0, 5))
         self.progress_var = tk.DoubleVar(value=0)

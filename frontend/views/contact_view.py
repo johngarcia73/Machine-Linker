@@ -81,7 +81,11 @@ class ContactView(ttk.Frame):
             return
         
         mac_to_rename = self._mac_map[selection_index[0]]
-        self.rename_callback(mac_to_rename)
+        try:
+            self.rename_callback(mac_to_rename)
+        except Exception as e:
+            print(f"Error renaming contact: {e}")
+            tk.messagebox.showerror("Error", "An error occurred while renaming the contact.")
 
     def _on_select(self, event=None):
         selection_index = self.contact_listbox.curselection()
