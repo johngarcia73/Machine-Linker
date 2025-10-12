@@ -10,6 +10,7 @@ from time import sleep
 import threading
 import struct
 import zlib
+from .utils import serialize_directory, reconstruct_directory
 
 class App(tk.Tk):
     def __init__(self):
@@ -67,7 +68,11 @@ class App(tk.Tk):
             self._add_to_history(src_mac, "System", f"File received: '{filename}'.", False)
             
             self.after(100, lambda: self._prompt_save_file(filename, file_content))
-
+        elif payload.startswith(b"DIR:"):
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self.status_var.set(f"Incoming folder from {sender_name}.")
+            self._add_to_history(src_mac, "System", "Folder received", False)
+            self.after(100, lambda: self._prompt_save_directory(payload))
 
     def _build_config_bar(self):
         frame = ttk.Frame(self, padding="5")
@@ -205,34 +210,54 @@ class App(tk.Tk):
     def _send_file(self):
         if not self.current_chat_mac or not self.machine: return
 
-        filepath = filedialog.askopenfilename(title="Select a file to send")
-        if not filepath:
-            return
-
-        filename = os.path.basename(filepath)
-        try:
-            with open(filepath, "rb") as f:
-                file_content = f.read()
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not read file: {e}")
-            return
-
-        payload = b"FILE:" + filename.encode() + b"::" + file_content
+        send_type = messagebox.askquestion("Send", "Do you want to send a folder?", 
+                                         icon='question')
         
-        self.status_var.set(f"Sending {filename} ({len(payload)} bytes)...")
+        if send_type == 'yes':
+            # Select folder
+            path = filedialog.askdirectory(title="Select folder to send")
+            if not path: return
+            
+            try:
+                folder_name, payload = serialize_directory(path)
+                display_name = folder_name
+                msg_type = "Folder"
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not prepare folder: {e}")
+                return
+        else:
+            # Select fiel
+            path = filedialog.askopenfilename(
+                title="Select file to send",
+                filetypes=[("All files", "*.*")]
+            )
+            if not path: return
+            
+            try:
+                display_name = os.path.basename(path)
+                with open(path, "rb") as f:
+                    payload = b"FILE:" + display_name.encode() + b"::" + f.read()
+                msg_type = "File"
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not read file: {e}")
+                return
+
+        self.status_var.set(f"Sending {display_name} ({len(payload)} bytes)...")
         self.update_idletasks()
 
         def progress_update(percentage: int):
             self.chat_view.update_progress_bar(percentage)
+            self.status_var.set(f"Sending {display_name}: {percentage}%")
 
         def on_send_complete():
             self.chat_view.hide_progress_bar()
             self.chat_view.send_btn.config(state="normal")
             self.chat_view.attach_btn.config(state="normal")
-            self.status_var.set(f"File {filename} sent successfully.")
-            self._add_to_history(self.current_chat_mac, "System", f"File sent: {filename}", True)
+            self.status_var.set(f"{msg_type} {display_name} sent successfully.")
+            self._add_to_history(self.current_chat_mac, "System", 
+                               f"{msg_type} sent: {display_name}", True)
 
-        self.chat_view.show_progress_bar(f"Sending {filename}...")
+        self.chat_view.show_progress_bar(f"Sending {display_name}...")
         self.chat_view.send_btn.config(state="disabled")
         self.chat_view.attach_btn.config(state="disabled")
 
@@ -264,6 +289,11 @@ class App(tk.Tk):
             self._add_to_history(src_mac, "System", f"File received: '{filename}'.", False)
             
             self.after(100, lambda: self._prompt_save_file(filename, file_content))
+        elif payload.startswith(b"DIR:"):
+            sender_name = self.contacts.get(src_mac, src_mac)
+            self.status_var.set(f"Incoming folder from {sender_name}.")
+            self._add_to_history(src_mac, "System", "Folder received", False)
+            self.after(100, lambda: self._prompt_save_directory(payload))
 
     def _prompt_save_file(self, filename, content):
         if messagebox.askyesno("Incoming File", f"You have received a file: '{filename}'.\nDo you want to save it?"):
@@ -275,6 +305,16 @@ class App(tk.Tk):
                     messagebox.showinfo("Success", f"File saved successfully to:\n{save_path}")
                 except Exception as e:
                     messagebox.showerror("Error", f"Could not save file: {e}")
+
+    def _prompt_save_directory(self, content: bytes):
+        if messagebox.askyesno("Incoming Folder", "You have received a folder. Do you want to save it?"):
+            save_path = filedialog.askdirectory(title="Select where to save the folder")
+            if save_path:
+                try:
+                    reconstruct_directory(save_path, content)
+                    messagebox.showinfo("Success", f"Folder saved successfully to:\n{save_path}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Could not save folder: {e}")
 
     def _add_to_history(self, mac_key, sender_display, text, is_self):
         """Helper function to manage chat history and update the view."""
