@@ -4,14 +4,15 @@ import struct
 import threading
 import time
 import random
-import zlib  # For CRC32 checksum
+import zlib
+import hmac
+import hashlib
 from typing import Dict, Any, Callable
 
 class Machine:
-
     ETH_P_ALL = 0x0003
     DEFAULT_ETHERTYPE = 0x1234
-    MAX_PAYLOAD_SIZE = 1480
+    MAX_PAYLOAD_SIZE = 1500
     TIME_OUT_SECONDS = 60
 
     FLAG_SPEAK = 0b00000000
@@ -27,12 +28,17 @@ class Machine:
     CHUNK_RETRANSMIT_TIMEOUT = 0.5
     SLIDING_WINDOW_SIZE = 16
 
+    # === ENCRYPTION (STD LIB) ===
+    STREAM_NONCE_SIZE = 8
+    HMAC_TAG_SIZE = 32
+
     def __init__(self, interface=None, ethertype=DEFAULT_ETHERTYPE,
                  frame_handler=None, discovery_handler=None, buffer_size=2048):
         self._interface = interface or self._first_non_lo()
         self._MAC = self.get_interface_mac()
         self.ethertype = ethertype
         self.buffer_size = buffer_size
+
         self._discovered_machines: Dict[str, str] = {}
         self._discovered_machines[self._MAC] = 'ME'
         
@@ -43,6 +49,11 @@ class Machine:
         self._running = False
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
 
+        # === ENCRYPTION  ===
+        self._encryption_enabled = False
+        self._psk = b'mi_clave_segura_de_32_bytes_12345678'  # clave precompartida
+
+
         #               Reassembly Buffer
         # Stores incoming chunks before they are complete.
         # Format: { transfer_id: { "total": int, "chunks": { index: data }, "timestamp": float } }
@@ -50,6 +61,58 @@ class Machine:
         self._outgoing_transfers: Dict[int, Dict[str, Any]] = {}
         self._transfer_lock = threading.Lock()
         self.send_greeting()
+
+    # ------------------------ ENCRYPTION API ------------------------
+    def set_psk(self, key: bytes):
+        """Define la clave precompartida (PSK)."""
+        if not isinstance(key, (bytes, bytearray)):
+            raise TypeError('PSK debe ser bytes')
+        if len(key) < 8:
+            raise ValueError('PSK demasiado corta, usa >= 16 bytes')
+        self._psk = bytes(key)
+
+    def enable_encryption(self, enabled: bool):
+        if enabled and self._psk is None:
+            raise RuntimeError('Primero configura la PSK con set_psk()')
+        self._encryption_enabled = bool(enabled)
+
+    # ------------------------ ENCRYPTION HELPERS ------------------------
+    def _derive_keystream(self, nonce: bytes, length: int) -> bytes:
+        out = bytearray()
+        ctr = 0
+        while len(out) < length:
+            ctr_bytes = struct.pack('!I', ctr)
+            digest = hashlib.sha256(self._psk + nonce + ctr_bytes).digest()
+            out.extend(digest)
+            ctr += 1
+        return bytes(out[:length])
+
+    def _xor_bytes(self, a: bytes, b: bytes) -> bytes:
+        return bytes(x ^ y for x, y in zip(a, b))
+
+    def _attempt_decrypt_payload(self, flag: int, payload: bytes) -> bytes | None:
+        if not self._encryption_enabled:
+            return payload
+        if self._psk is None:
+            print('Encriptado activo pero PSK no configurada')
+            return None
+        if len(payload) < (self.STREAM_NONCE_SIZE + self.HMAC_TAG_SIZE):
+            print('Payload cifrado demasiado pequeño — descartar')
+            return None
+        
+        nonce = payload[:self.STREAM_NONCE_SIZE]
+        tag = payload[-self.HMAC_TAG_SIZE:]
+        ciphertext = payload[self.STREAM_NONCE_SIZE:-self.HMAC_TAG_SIZE]
+
+        flag_byte = flag.to_bytes(1, 'big')
+        expected = hmac.new(self._psk, flag_byte + nonce + ciphertext, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, tag):
+            print('HMAC inválido — descartar frame')
+            return None
+        ks = self._derive_keystream(nonce, len(ciphertext))
+        plaintext = self._xor_bytes(ciphertext, ks)
+        return plaintext
+
 
     @staticmethod
     def mac_to_bytes(mac: str) -> bytes:
@@ -62,7 +125,6 @@ class Machine:
     @staticmethod
     def list_interfaces() -> list[str]:
         return [i for i in os.listdir("/sys/class/net")]
-
 
     def _open_socket(self):
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(self.ETH_P_ALL))
@@ -85,58 +147,66 @@ class Machine:
             self._thread.join(timeout=1)
             print("Machine stopped.")
 
+
+
+    def send_frame(self, dest_mac: str, payload: bytes, flag: int, src_mac: str = None):
+        src_mac_bytes = self.mac_to_bytes(src_mac or self._MAC)
+        dest_mac_bytes = self.mac_to_bytes(dest_mac)
+        eth_header = dest_mac_bytes + src_mac_bytes + struct.pack("!H", self.ethertype)
+        flag_byte = flag.to_bytes(1, 'big')
+
+        final_payload = payload
+        if self._encryption_enabled:
+            nonce = os.urandom(self.STREAM_NONCE_SIZE)
+            ks = self._derive_keystream(nonce, len(payload))
+            ciphertext = self._xor_bytes(payload, ks)
+            tag = hmac.new(self._psk, flag_byte + nonce + ciphertext, hashlib.sha256).digest()
+            final_payload = nonce + ciphertext + tag
+
+        frame = eth_header + flag_byte + final_payload
+        try:
+            self._socket.send(frame)
+        except OSError as e:
+            print(f"Failed to send frame: {e}")
+
     def _capture_loop(self):
         while self._running:
             try:
                 raw_frame, _ = self._socket.recvfrom(self.buffer_size)
-                
-                       #Ethernet Header Parsing
                 dest_mac = self.bytes_to_mac(raw_frame[0:6])
                 src_mac = self.bytes_to_mac(raw_frame[6:12])
                 eth_type = struct.unpack("!H", raw_frame[12:14])[0]
-                
+
                 if eth_type != self.ethertype:
                     continue
 
-                    #Custom Protocol
                 flag = raw_frame[14]
                 payload = raw_frame[15:]
 
-                if flag == self.FLAG_GREET:
-                    self.add_machine(src_mac)
-                    self.send_ack(src_mac)
+                clear_payload = self._attempt_decrypt_payload(flag, payload)
+                if clear_payload is None:
+                    continue
 
-                elif flag == self.FLAG_ACK:
-                    self.add_machine(src_mac)
-
-                elif flag == self.FLAG_SPEAK:
-                    if dest_mac == "ff:ff:ff:ff:ff:ff":
-                        # Handle broadcast messages
-                        if self._handler:
-                            self._handler(dest_mac, src_mac, payload)
-                    else:
-                        # Handle direct messages
-                        if self._handler:
-                            self._handler(dest_mac, src_mac, payload)
-
+                if flag == self.FLAG_SPEAK and self._handler:
+                    self._handler(dest_mac, src_mac, clear_payload)
                 elif flag == self.FLAG_CHUNK:
-                    self._process_chunk(dest_mac, src_mac, payload)
-
+                    self._process_chunk(dest_mac, src_mac, clear_payload)
                 elif flag == self.FLAG_CHUNK_ACK:
-                    self._process_chunk_ack(src_mac, payload)
-
+                    self._process_chunk_ack(src_mac, clear_payload)
                 elif flag == self.FLAG_CHUNK_NACK:
-                    self._process_chunk_nack(src_mac, payload)
+                    self._process_chunk_nack(src_mac, clear_payload)
 
             except socket.error:
-                if self._running: print("Socket error in capture loop.")
+                if self._running:
+                    print("Socket error in capture loop.")
                 break
-
             except Exception as e:
-                if self._running: print(f"An error occurred in capture loop: {e}")
+                if self._running:
+                    print(f"Error in capture loop: {e}")
                 break
 
         print("Capture loop terminated.")
+
 
     def _process_chunk(self, dest_mac, src_mac, payload):
         """Validates and stores a chunk, reassembling the message if complete.
@@ -181,7 +251,8 @@ class Machine:
 
 
     def _process_chunk_ack(self, src_mac, payload):
-        if len(payload) < self.TRANSPORT_HEADER_SIZE: return
+        if len(payload) < self.TRANSPORT_HEADER_SIZE:
+            return
         tid, index, _, _ = struct.unpack(self.TRANSPORT_HEADER_FORMAT, payload)
         with self._transfer_lock:
             if tid in self._outgoing_transfers:
@@ -190,7 +261,8 @@ class Machine:
                         self._outgoing_transfers[tid]["ack_status"][index] = True
 
     def _process_chunk_nack(self, src_mac, payload):
-        if len(payload) < self.TRANSPORT_HEADER_SIZE: return
+        if len(payload) < self.TRANSPORT_HEADER_SIZE:
+            return
         tid, index, _, _ = struct.unpack(self.TRANSPORT_HEADER_FORMAT, payload)
         with self._transfer_lock:
             if tid in self._outgoing_transfers:
@@ -199,51 +271,36 @@ class Machine:
                     self._send_chunk_internal(tid, index)
 
     def _reassemble_chunks(self, tid):
-        """Reconstructs the full message from chunks and passes it to the handler.
-        """
-        # pop to avoid keeping completed transfer in memory
         transfer = self._reassembly_buffer.pop(tid, None)
         if transfer is None:
             return
-
         total_chunks = transfer["total"]
         chunks = transfer["chunks"]
         src_mac = transfer.get("src", None)
-
         if len(chunks) != total_chunks:
-            print(f"Transfer {tid} from {src_mac} is incomplete. Dropping.")
+            print(f"Transfer {tid} from {src_mac} incomplete. Dropping.")
             return
-
         try:
             full_data = b"".join(chunks[i] for i in range(total_chunks))
         except KeyError:
-            # missing piece (won't happen now)
-            print(f"Transfer {tid} missing chunks on reassembly from {src_mac}.")
+            print(f"Transfer {tid} missing chunks from {src_mac}.")
             return
-
-        print(f"Reassembled message of {len(full_data)} bytes from {src_mac} (transfer {tid}).")
+        print(f"Reassembled message of {len(full_data)} bytes from {src_mac}.")
         if self._handler:
-            # dest_mac is this machine's MAC (frame received was addressed to us)
             self._handler(self._MAC, src_mac, full_data)
 
-
     def _cleanup_buffer(self):
-        """Removes old, incomplete transfers from the reassembly buffer.
-        """
         current_time = time.time()
         to_delete = []
         for tid, data in list(self._reassembly_buffer.items()):
-            # data must have a 'timestamp'; if missing, be conservative and schedule deletion
             ts = data.get("timestamp", 0)
             if current_time - ts > self.TIME_OUT_SECONDS:
                 to_delete.append(tid)
-
         for tid in to_delete:
             transfer = self._reassembly_buffer.pop(tid, None)
             if transfer:
                 src = transfer.get("src", "<unknown>")
                 print(f"Timed out and removed incomplete transfer {tid} from {src}.")
-
 
     def add_machine(self, mac, name='NEW_MACHINE'):
         if mac not in self._discovered_machines:
@@ -252,17 +309,10 @@ class Machine:
             if self._discovery_handler:
                 self._discovery_handler(mac)
 
-
-    def send_frame(self, dest_mac: str, payload: bytes, flag: int, src_mac: str = None):
-        src_mac_bytes = self.mac_to_bytes(src_mac or self._MAC)
-        dest_mac_bytes = self.mac_to_bytes(dest_mac)
-        eth_header = dest_mac_bytes + src_mac_bytes + struct.pack("!H", self.ethertype)
-        
-        frame = eth_header + flag.to_bytes(1, 'big') + payload
-        self._socket.send(frame)
-
     def send_greeting(self):
         self.send_frame("ff:ff:ff:ff:ff:ff", b'', self.FLAG_GREET)
+
+
 
     def send_ack(self, dest_mac: str):
         self.send_frame(dest_mac, b'', self.FLAG_ACK)
@@ -271,40 +321,30 @@ class Machine:
         header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, index, total, 0)
         self.send_frame(dest_mac, header, flag)
 
-    def send_data(self, dest_mac: str, data: bytes, progress_callback: Callable[[int], None] = None, completion_callback: Callable[[], None] = None):
-        """
-        Sends data to a specific MAC. Automatically handles fragmentation for large data.
-        """
-        # If data is small enough, send as a single frame.
+    def send_data(self, dest_mac: str, data: bytes, progress_callback: Callable[[int], None] | None = None, completion_callback: Callable[[], None] | None = None):
         if len(data) <= self.MAX_PAYLOAD_SIZE:
             self.send_frame(dest_mac, data, self.FLAG_SPEAK)
             if completion_callback:
                 completion_callback()
             return
-
-        # If data is too large, divide it.
         tid = random.randint(0, 0xFFFFFFFF)
         chunks = [data[i:i + self.CHUNK_DATA_SIZE] for i in range(0, len(data), self.CHUNK_DATA_SIZE)]
         total_chunks = len(chunks)
-
         with self._transfer_lock:
-            self._outgoing_transfers[tid] = {
-                "dest_mac": dest_mac,
-                "chunks": chunks,
-                "total_chunks": total_chunks,
-                "ack_status": [False] * total_chunks,
-                "last_sent_time": [0.0] * total_chunks,
-                "lock": threading.Lock(),
-                "progress_callback": progress_callback,
-                "completion_callback": completion_callback
-            }
+            self._outgoing_transfers[tid] = {"dest_mac": dest_mac, "chunks": chunks, "total_chunks": total_chunks,
+                                             "ack_status": [False] * total_chunks,
+                                             "last_sent_time": [0.0] * total_chunks,
+                                             "lock": threading.Lock(),
+                                             "progress_callback": progress_callback,
+                                             "completion_callback": completion_callback}
         threading.Thread(target=self._manage_transfer, args=(tid,), daemon=True).start()
         print(f"Data is large ({len(data)} bytes). Starting ARQ transfer {tid} with {total_chunks} chunks.")
 
     def _manage_transfer(self, tid: int):
         try:
             with self._transfer_lock:
-                if tid not in self._outgoing_transfers: return
+                if tid not in self._outgoing_transfers:
+                    return
                 transfer = self._outgoing_transfers[tid]
             window_start = 0
             last_progress_pct = -1
@@ -346,6 +386,7 @@ class Machine:
         header = struct.pack(self.TRANSPORT_HEADER_FORMAT, tid, index, transfer["total_chunks"], crc)
         self.send_frame(transfer["dest_mac"], header + chunk_data, self.FLAG_CHUNK)
         transfer["last_sent_time"][index] = time.time()
+
 
     def get_interface_mac(self) -> str:
         with open(f"/sys/class/net/{self._interface}/address") as f:

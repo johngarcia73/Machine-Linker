@@ -41,7 +41,7 @@ sudo docker exec -it <image-name> /bin/bash     --- Enters to container: Images 
 
 python3 run.py      (Inside each one of these linux terminal)
 
-If got a tkinter error, run on host:
+If got a tkinter error, run on host:sudo compos
     xhost +local:root
 
 # That's it, you have up to three virtual machines to test the app!
